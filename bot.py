@@ -398,7 +398,8 @@ async def send_short_video(
                 f"📱 Shorts "
                 f"{current_index + 1}/{len(shorts)}"
             ),
-            reply_markup=inline(buttons)
+            reply_markup=inline(buttons),
+            protect_content=True
         )
 
     finally:
@@ -4458,7 +4459,8 @@ async def numeric_search(
                     f"📺 {episode['episode_number']}-qism\n"
                     f"📝 {episode['title']}\n"
                     f"🆔 ID: <code>{episode['id']}</code>"
-                )
+                ),
+                protect_content=True
             )
 
         finally:
@@ -4662,7 +4664,8 @@ async def user_episode(
                 f"🎬 <b>{episode['anime']}</b>\n"
                 f"📺 {episode['episode_number']}-qism\n"
                 f"📝 {episode['title']}"
-            )
+            ),
+            protect_content=True
         )
 
     finally:
