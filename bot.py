@@ -2673,6 +2673,14 @@ async def episode_video(
 
     update_episode_vip_status()
 
+    asyncio.create_task(
+        notify_favorited_users(
+            data["anime_id"],
+            data["anime_title"],
+            data["number"]
+        )
+    )
+
     await state.clear()
 
     vip_text = (
@@ -4602,6 +4610,797 @@ async def shorts_main_button(
 
 
 # =========================================================
+# USER DISCOVERY / FAVORITES / HISTORY / REQUESTS
+# =========================================================
+
+async def send_anime_card(
+    message: Message,
+    anime_id: int
+) -> bool:
+
+    conn = connect_db()
+
+    anime = conn.execute(
+        """
+        SELECT id, title, description, genre
+        FROM animes
+        WHERE id=?
+        AND is_active=1
+        """,
+        (anime_id,)
+    ).fetchone()
+
+    if not anime:
+        conn.close()
+        return False
+
+    episodes = conn.execute(
+        """
+        SELECT id, episode_number, title, is_vip
+        FROM episodes
+        WHERE anime_id=?
+        ORDER BY episode_number ASC, id ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    buttons = []
+
+    for ep in episodes:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🔒 {ep['episode_number']}-qism ⭐ VIP"
+                    if ep["is_vip"]
+                    else f"▶️ {ep['episode_number']}-qism"
+                ),
+                callback_data=f"user_episode_{ep['id']}"
+            )
+        ])
+
+    favorite = is_favorite(
+        message.from_user.id,
+        anime_id
+    )
+
+    buttons.append([
+        InlineKeyboardButton(
+            text=(
+                "💔 Sevimlilardan olib tashlash"
+                if favorite
+                else "❤️ Sevimlilarga qo‘shish"
+            ),
+            callback_data=f"favorite_toggle_{anime_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        f"🎬 <b>{anime['title']}</b>\n\n"
+        f"📝 {anime['description'] or '-'}\n"
+        f"🎭 Janr: <b>{anime['genre'] or 'Noma‘lum'}</b>\n\n"
+        "📺 <b>Qismlar:</b>\n"
+        "✅ 1–3-qism bepul\n"
+        "🔒 4-qismdan boshlab VIP",
+        reply_markup=inline(buttons)
+    )
+
+    return True
+
+
+@dp.message(F.text == "🆕 Yangi")
+async def new_anime_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT id, title
+        FROM animes
+        WHERE is_active=1
+        ORDER BY id DESC
+        LIMIT 15
+        """
+    ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        await message.answer(
+            "🆕 <b>YANGI ANIMELAR</b>\n\nHozircha anime yo‘q.",
+            reply_markup=user_keyboard()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🎬 {row['title'][:45]}",
+                callback_data=f"open_anime_{row['id']}"
+            )
+        ]
+        for row in rows
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "🆕 <b>YANGI ANIMELAR</b>\n\n"
+        "Eng so‘nggi qo‘shilganlar:",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "🔥 Mashhur")
+async def popular_anime_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT
+            a.id,
+            a.title,
+            COUNT(h.id) AS views
+        FROM animes a
+        LEFT JOIN watch_history h
+            ON h.anime_id=a.id
+        WHERE a.is_active=1
+        GROUP BY a.id, a.title
+        ORDER BY views DESC, a.id DESC
+        LIMIT 15
+        """
+    ).fetchall()
+
+    conn.close()
+
+    buttons = []
+
+    for row in rows:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🔥 {row['title'][:38]} · {row['views']}",
+                callback_data=f"open_anime_{row['id']}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "🔥 <b>MASHHUR ANIMELAR</b>\n\n"
+        "Ko‘rishlar asosida:",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "❤️ Sevimlilar")
+async def favorites_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT a.id, a.title
+        FROM favorites f
+        JOIN animes a ON a.id=f.anime_id
+        WHERE f.telegram_id=?
+        AND a.is_active=1
+        ORDER BY f.id DESC
+        LIMIT 30
+        """,
+        (message.from_user.id,)
+    ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        await message.answer(
+            "❤️ <b>SEVIMLILAR</b>\n\n"
+            "Hali anime saqlanmagan.",
+            reply_markup=user_keyboard()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"❤️ {row['title'][:45]}",
+                callback_data=f"open_anime_{row['id']}"
+            )
+        ]
+        for row in rows
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "❤️ <b>SEVIMLI ANIMELAR</b>",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "🕘 Tarix")
+async def history_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT
+            h.episode_id,
+            a.title AS anime,
+            e.episode_number
+        FROM watch_history h
+        JOIN animes a ON a.id=h.anime_id
+        JOIN episodes e ON e.id=h.episode_id
+        WHERE h.telegram_id=?
+        ORDER BY h.watched_at DESC
+        LIMIT 20
+        """,
+        (message.from_user.id,)
+    ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        await message.answer(
+            "🕘 <b>TARIX</b>\n\nHali qism ko‘rilmagan.",
+            reply_markup=user_keyboard()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"▶️ {row['anime'][:30]} · {row['episode_number']}-qism",
+                callback_data=f"user_episode_{row['episode_id']}"
+            )
+        ]
+        for row in rows
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "🕘 <b>KO‘RISH TARIXI</b>\n\n"
+        "Oxirgi ko‘rilgan qismlar:",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "📚 Janrlar")
+async def genres_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT genre
+        FROM animes
+        WHERE is_active=1
+        AND genre <> ''
+        """
+    ).fetchall()
+
+    conn.close()
+
+    genres = set()
+
+    for row in rows:
+        for genre in (row["genre"] or "").split(","):
+            genre = genre.strip()
+            if genre:
+                genres.add(genre)
+
+    genres = sorted(genres, key=str.casefold)
+
+    if not genres:
+        await message.answer(
+            "📚 <b>JANRLAR</b>\n\nHozircha janr mavjud emas.",
+            reply_markup=user_keyboard()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🎭 {genre[:50]}",
+                callback_data=f"genre_{index}"
+            )
+        ]
+        for index, genre in enumerate(genres[:30])
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "📚 <b>JANRLAR</b>\n\nJanrni tanlang:",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "📩 Anime so‘rash")
+async def anime_request_button(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    await state.set_state(AnimeRequest.title)
+
+    await message.answer(
+        "📩 <b>ANIME SO‘RASH</b>\n\n"
+        "Kerakli anime nomini yozing.",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(AnimeRequest.title)
+async def anime_request_title(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        await state.clear()
+        return
+
+    title = (message.text or "").strip()
+
+    if not title:
+        await ask_text(message, "❌ Anime nomini yozing.")
+        return
+
+    register_user(message.from_user)
+
+    conn = connect_db()
+
+    cursor = conn.execute(
+        """
+        INSERT INTO anime_requests (
+            telegram_id,
+            title
+        )
+        VALUES (?, ?)
+        """,
+        (
+            message.from_user.id,
+            title
+        )
+    )
+
+    request_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+
+    await message.answer(
+        "✅ <b>SO‘ROV QABUL QILINDI</b>\n\n"
+        f"🆔 So‘rov: <code>{request_id}</code>\n"
+        f"🎬 {title}\n\n"
+        "Admin ko‘rib chiqadi.",
+        reply_markup=user_keyboard()
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                "📩 <b>YANGI ANIME SO‘ROVI</b>\n\n"
+                f"🆔 <code>{request_id}</code>\n"
+                f"👤 User: <code>{message.from_user.id}</code>\n"
+                f"🎬 <b>{title}</b>"
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Request notification failed: {type(exc).__name__}: {exc}",
+                flush=True
+            )
+
+
+@dp.callback_query(F.data.regexp(r"^open_anime_\d+$"))
+async def open_anime_callback(
+    callback: CallbackQuery
+):
+
+    if user_is_banned(callback.from_user.id):
+        await callback.answer(
+            "❌ Siz bloklangansiz.",
+            show_alert=True
+        )
+        return
+
+    anime_id = int(
+        callback.data.rsplit("_", 1)[1]
+    )
+
+    await callback.answer()
+
+    if not await send_anime_card(
+        callback.message,
+        anime_id
+    ):
+        await callback.answer(
+            "❌ Anime topilmadi.",
+            show_alert=True
+        )
+
+
+@dp.callback_query(F.data.regexp(r"^favorite_toggle_\d+$"))
+async def favorite_toggle_callback(
+    callback: CallbackQuery
+):
+
+    if user_is_banned(callback.from_user.id):
+        await callback.answer(
+            "❌ Siz bloklangansiz.",
+            show_alert=True
+        )
+        return
+
+    anime_id = int(
+        callback.data.rsplit("_", 1)[1]
+    )
+
+    if not await send_anime_card(
+        callback.message,
+        anime_id
+    ):
+        await callback.answer(
+            "❌ Anime topilmadi.",
+            show_alert=True
+        )
+        return
+
+    favorite = toggle_favorite(
+        callback.from_user.id,
+        anime_id
+    )
+
+    # Refresh the card with the new favorite state.
+    await callback.message.delete()
+
+    await send_anime_card(
+        callback.message,
+        anime_id
+    )
+
+    await callback.answer(
+        "❤️ Saqlandi." if favorite else "💔 O‘chirildi."
+    )
+
+
+@dp.callback_query(F.data.regexp(r"^genre_\d+$"))
+async def genre_callback(
+    callback: CallbackQuery
+):
+
+    if user_is_banned(callback.from_user.id):
+        await callback.answer(
+            "❌ Siz bloklangansiz.",
+            show_alert=True
+        )
+        return
+
+    index = int(
+        callback.data.rsplit("_", 1)[1]
+    )
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT genre
+        FROM animes
+        WHERE is_active=1
+        AND genre <> ''
+        """
+    ).fetchall()
+
+    conn.close()
+
+    genres = set()
+
+    for row in rows:
+        for genre in (row["genre"] or "").split(","):
+            genre = genre.strip()
+            if genre:
+                genres.add(genre)
+
+    genres = sorted(genres, key=str.casefold)
+
+    if index >= len(genres):
+        await callback.answer(
+            "❌ Janr topilmadi.",
+            show_alert=True
+        )
+        return
+
+    genre = genres[index]
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT id, title
+        FROM animes
+        WHERE is_active=1
+        AND genre ILIKE ?
+        ORDER BY id DESC
+        LIMIT 30
+        """,
+        (f"%{genre}%",)
+    ).fetchall()
+
+    conn.close()
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🎬 {row['title'][:48]}",
+                callback_data=f"open_anime_{row['id']}"
+            )
+        ]
+        for row in rows
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Janrlar",
+            callback_data="user_genres"
+        )
+    ])
+
+    await callback.message.edit_text(
+        f"🎭 <b>{genre}</b>\n\n"
+        "Anime tanlang:",
+        reply_markup=inline(buttons)
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "user_genres")
+async def user_genres_callback(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT genre
+        FROM animes
+        WHERE is_active=1
+        AND genre <> ''
+        """
+    ).fetchall()
+
+    conn.close()
+
+    genres = set()
+
+    for row in rows:
+        for genre in (row["genre"] or "").split(","):
+            genre = genre.strip()
+            if genre:
+                genres.add(genre)
+
+    genres = sorted(genres, key=str.casefold)
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🎭 {genre[:50]}",
+                callback_data=f"genre_{index}"
+            )
+        ]
+        for index, genre in enumerate(genres[:30])
+    ]
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await callback.message.edit_text(
+        "📚 <b>JANRLAR</b>\n\nJanrni tanlang:",
+        reply_markup=inline(buttons)
+    )
+
+
+# =========================================================
+# ADMIN BAN / UNBAN
+# =========================================================
+
+@dp.message(F.text.startswith("/ban"))
+async def admin_ban_command(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    await state.clear()
+
+    parts = (message.text or "").split(maxsplit=2)
+
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer(
+            "❌ Format: <code>/ban TELEGRAM_ID [sabab]</code>"
+        )
+        return
+
+    user_id = int(parts[1])
+
+    if is_admin(user_id):
+        await message.answer("❌ Adminni bloklab bo‘lmaydi.")
+        return
+
+    reason = (
+        parts[2].strip()
+        if len(parts) >= 3
+        else "Admin tomonidan bloklandi."
+    )
+
+    conn = connect_db()
+
+    conn.execute(
+        """
+        INSERT INTO users (
+            telegram_id,
+            is_banned,
+            ban_reason
+        )
+        VALUES (?, 1, ?)
+        ON CONFLICT(telegram_id)
+        DO UPDATE SET
+            is_banned=1,
+            ban_reason=excluded.ban_reason
+        """,
+        (user_id, reason)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await message.answer(
+        "🚫 <b>USER BLOKLANDI</b>\n\n"
+        f"👤 ID: <code>{user_id}</code>\n"
+        f"📝 {reason}"
+    )
+
+
+@dp.message(F.text.startswith("/unban"))
+async def admin_unban_command(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(message.from_user.id):
+        return
+
+    await state.clear()
+
+    parts = (message.text or "").split()
+
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer(
+            "❌ Format: <code>/unban TELEGRAM_ID</code>"
+        )
+        return
+
+    user_id = int(parts[1])
+
+    conn = connect_db()
+
+    conn.execute(
+        """
+        UPDATE users
+        SET is_banned=0,
+            ban_reason=''
+        WHERE telegram_id=?
+        """,
+        (user_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await message.answer(
+        "✅ <b>USER BLOKDAN CHIQARILDI</b>\n\n"
+        f"👤 ID: <code>{user_id}</code>"
+    )
+
+
+# =========================================================
 # DIRECT ID SEARCH
 # =========================================================
 
@@ -4639,6 +5438,7 @@ async def numeric_search(
             e.title,
             e.video_file_id,
             e.is_vip,
+            e.anime_id,
             a.title AS anime
         FROM episodes e
         JOIN animes a
@@ -4690,6 +5490,12 @@ async def numeric_search(
         )
 
         try:
+
+            record_watch(
+                message.from_user.id,
+                episode["anime_id"],
+                episode["id"]
+            )
 
             await message.answer_video(
                 episode["video_file_id"],
@@ -4813,6 +5619,13 @@ async def user_episode(
     callback: CallbackQuery
 ):
 
+    if user_is_banned(callback.from_user.id):
+        await callback.answer(
+            "❌ Siz bloklangansiz.",
+            show_alert=True
+        )
+        return
+
     episode_id = int(
         callback.data.rsplit("_", 1)[1]
     )
@@ -4895,6 +5708,12 @@ async def user_episode(
     )
 
     try:
+
+        record_watch(
+            callback.from_user.id,
+            episode["anime_id"],
+            episode["id"]
+        )
 
         await bot.send_video(
             callback.from_user.id,
