@@ -1072,6 +1072,18 @@ async def start_handler(
 
     await state.clear()
 
+    command_parts = (message.text or "").split(maxsplit=1)
+
+    if (
+        len(command_parts) == 2
+        and command_parts[1].startswith("anime_")
+    ):
+        value = command_parts[1].replace("anime_", "", 1)
+
+        if value.isdigit():
+            if await send_anime_card(message, int(value)):
+                return
+
     if is_admin(
         message.from_user.id
     ):
@@ -4640,7 +4652,8 @@ async def send_anime_card(
         FROM episodes
         WHERE anime_id=?
         ORDER BY episode_number ASC, id ASC
-        """
+        """,
+        (anime_id,)
     ).fetchall()
 
     conn.close()
@@ -5124,6 +5137,18 @@ async def favorite_toggle_callback(
         callback.data.rsplit("_", 1)[1]
     )
 
+    register_user(callback.from_user)
+
+    favorite = toggle_favorite(
+        callback.from_user.id,
+        anime_id
+    )
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
     if not await send_anime_card(
         callback.message,
         anime_id
@@ -5134,23 +5159,11 @@ async def favorite_toggle_callback(
         )
         return
 
-    favorite = toggle_favorite(
-        callback.from_user.id,
-        anime_id
-    )
-
-    # Refresh the card with the new favorite state.
-    await callback.message.delete()
-
-    await send_anime_card(
-        callback.message,
-        anime_id
-    )
-
     await callback.answer(
-        "❤️ Saqlandi." if favorite else "💔 O‘chirildi."
+        "❤️ Sevimlilarga qo‘shildi."
+        if favorite
+        else "💔 Sevimlilardan olib tashlandi."
     )
-
 
 @dp.callback_query(F.data.regexp(r"^genre_\d+$"))
 async def genre_callback(
@@ -5407,195 +5420,136 @@ async def admin_unban_command(
 @dp.message(
     F.text.regexp(r"^\d+$")
 )
-async def numeric_search(
-    message: Message,
-    state: FSMContext
-):
+﻿import asyncio
+import os
+import sqlite3
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-    if user_is_banned(message.from_user.id):
-        return
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
+from dotenv import load_dotenv
 
-    current_state = await state.get_state()
 
-    if current_state:
-        return
+# =========================================================
+# CONFIG
+# =========================================================
 
-    register_user(
-        message.from_user
+load_dotenv()
+
+BOT_TOKEN = (os.getenv("BOT_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+
+ADMIN_IDS = {
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
+DB_PATH = "data/bot.db"
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN .env faylida topilmadi.")
+
+if not ADMIN_IDS:
+    raise ValueError("ADMIN_IDS .env faylida topilmadi.")
+
+Path("data").mkdir(exist_ok=True)
+
+
+# =========================================================
+# BOT
+# =========================================================
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
     )
+)
 
-    value = int(
-        message.text.strip()
-    )
+dp = Dispatcher()
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+def connect_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db():
 
     conn = connect_db()
 
-    episode = conn.execute(
-        """
-        SELECT
-            e.id,
-            e.episode_number,
-            e.title,
-            e.video_file_id,
-            e.is_vip,
-            e.anime_id,
-            a.title AS anime
-        FROM episodes e
-        JOIN animes a
-        ON a.id=e.anime_id
-        WHERE e.id=?
-        """,
-        (value,)
-    ).fetchone()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            is_vip INTEGER DEFAULT 0,
+            vip_until TEXT,
+            is_admin INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
-    if episode:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS animes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            anime_id INTEGER NOT NULL,
+            episode_number INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            video_file_id TEXT NOT NULL,
+            is_vip INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (anime_id)
+            REFERENCES animes(id)
+            ON DELETE CASCADE
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXIS    if anime:
 
         conn.close()
 
-        if (
-            episode["is_vip"]
-            and not user_is_vip(
-                message.from_user.id
-            )
+        if await send_anime_card(
+            message,
+            value
         ):
-
-            await message.answer(
-                "🔒 <b>VIP KONTENT</b>\n\n"
-                "Bu qism 4-qismdan boshlab VIP kontentga kiradi.\n\n"
-                "⭐ VIP oling va barcha qismlarni oching.",
-                reply_markup=inline([
-                    [
-                        InlineKeyboardButton(
-                            text="⭐ VIP olish",
-                            url="https://t.me/Ichi1010"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="🏠 Bosh menyu",
-                            callback_data="user_home"
-                        )
-                    ]
-                ])
-            )
-
             return
 
-        loading_message, opening_message = (
-            await send_loading_messages(
-                message.from_user.id,
-                "⏳ <b>Qism tayyorlanmoqda...</b>",
-                "🎬 <b>Qism ochilmoqda...</b>"
-            )
+        await message.answer(
+            "❌ <b>Bunday anime topilmadi.</b>",
+            reply_markup=user_keyboard()
         )
-
-        try:
-
-            record_watch(
-                message.from_user.id,
-                episode["anime_id"],
-                episode["id"]
-            )
-
-            await message.answer_video(
-                episode["video_file_id"],
-                caption=(
-                    f"🎬 <b>{episode['anime']}</b>\n"
-                    f"📺 {episode['episode_number']}-qism\n"
-                    f"📝 {episode['title']}\n"
-                    f"🆔 ID: <code>{episode['id']}</code>"
-                ),
-                protect_content=True
-            )
-
-        finally:
-
-            await delete_message_safe(
-                message.chat.id,
-                loading_message.message_id
-            )
-
-            await delete_message_safe(
-                message.chat.id,
-                opening_message.message_id
-            )
-
-        return
-
-    anime = conn.execute(
-        """
-        SELECT
-            id,
-            title,
-            description
-        FROM animes
-        WHERE id=?
-        AND is_active=1
-        """,
-        (value,)
-    ).fetchone()
-
-    if anime:
-
-        episodes = conn.execute(
-            """
-            SELECT
-                id,
-                episode_number,
-                title,
-                is_vip
-            FROM episodes
-            WHERE anime_id=?
-            ORDER BY episode_number ASC, id ASC
-            """,
-            (value,)
-        ).fetchall()
-
-        conn.close()
-
-        buttons = []
-
-        for ep in episodes:
-
-            if ep["is_vip"]:
-
-                label = (
-                    f"🔒 {ep['episode_number']}-qism "
-                    f"⭐ VIP"
-                )
-
-            else:
-
-                label = (
-                    f"▶️ {ep['episode_number']}-qism"
-                )
-
-            buttons.append([
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"user_episode_{ep['id']}"
-                )
-            ])
-
-        if buttons:
-
-            await message.answer(
-                f"🎬 <b>{anime['title']}</b>\n\n"
-                f"{anime['description']}\n\n"
-                "📺 <b>Qismlar:</b>\n"
-                "✅ 1–3-qism bepul\n"
-                "🔒 4-qismdan boshlab VIP",
-                reply_markup=inline(buttons)
-            )
-
-        else:
-
-            await message.answer(
-                f"🎬 <b>{anime['title']}</b>\n\n"
-                f"{anime['description']}\n\n"
-                "📺 Hozircha qism yo‘q.",
-                reply_markup=user_keyboard()
-            )
 
         return
 
