@@ -17,8 +17,10 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    FSInputFile,
 )
 from dotenv import load_dotenv
+from backup_db import make_backup
 
 
 # =========================================================
@@ -36,6 +38,7 @@ ADMIN_IDS = {
 }
 
 DB_PATH = "data/bot.db"
+BACKUP_INTERVAL_SECONDS = int(os.getenv("BACKUP_INTERVAL_HOURS", "24")) * 60 * 60
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN .env faylida topilmadi.")
@@ -299,7 +302,6 @@ def record_watch(
     anime_id: int,
     episode_id: int
 ):
-
     conn = connect_db()
 
     conn.execute(
@@ -323,6 +325,38 @@ def record_watch(
         )
     )
 
+    conn.execute(
+        """
+        UPDATE episodes
+        SET view_count = COALESCE(view_count, 0) + 1
+        WHERE id=?
+        """,
+        (episode_id,)
+    )
+
+    conn.execute(
+        """
+        UPDATE animes
+        SET view_count = COALESCE(view_count, 0) + 1
+        WHERE id=?
+        """,
+        (anime_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def record_short_view(short_id: int):
+    conn = connect_db()
+    conn.execute(
+        """
+        UPDATE shorts
+        SET view_count = COALESCE(view_count, 0) + 1
+        WHERE id=?
+        """,
+        (short_id,)
+    )
     conn.commit()
     conn.close()
 
@@ -555,6 +589,8 @@ async def send_short_video(
         )
     )
 
+    record_short_view(current["id"])
+
     try:
 
         video_message = await bot.send_video(
@@ -643,12 +679,15 @@ class AddAnime(StatesGroup):
     title = State()
     description = State()
     genre = State()
+    poster = State()
 
 
 class EditAnime(StatesGroup):
     anime_id = State()
     title = State()
     description = State()
+    genre = State()
+    poster = State()
 
 
 class AddEpisode(StatesGroup):
@@ -781,10 +820,13 @@ def user_keyboard():
             ],
             [
                 KeyboardButton(text="🔥 Mashhur"),
-                KeyboardButton(text="🎞 Shorts")
+                KeyboardButton(text="🏆 Top 10")
             ],
             [
-                KeyboardButton(text="❤️ Sevimlilar"),
+                KeyboardButton(text="🎞 Shorts"),
+                KeyboardButton(text="❤️ Sevimlilar")
+            ],
+            [
                 KeyboardButton(text="🕘 Tarix")
             ],
             [
@@ -821,7 +863,12 @@ def admin_keyboard():
                 KeyboardButton(text="👥 Foydalanuvchilar")
             ],
             [
-                KeyboardButton(text="📊 Statistika")
+                KeyboardButton(text="📊 Statistika"),
+                KeyboardButton(text="🏆 Top 10")
+            ],
+            [
+                KeyboardButton(text="💾 Backup"),
+                KeyboardButton(text="📈 Dashboard")
             ]
         ],
         resize_keyboard=True,
@@ -1004,6 +1051,20 @@ def admin_inline():
             InlineKeyboardButton(
                 text="📊 Statistika",
                 callback_data="admin_stats"
+            ),
+            InlineKeyboardButton(
+                text="🏆 Top 10",
+                callback_data="admin_top10"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="💾 Backup",
+                callback_data="admin_backup"
+            ),
+            InlineKeyboardButton(
+                text="📈 Dashboard",
+                callback_data="admin_dashboard"
             )
         ]
     ])
@@ -1044,6 +1105,9 @@ async def startup():
     print("✅ 1-3 qism bepul", flush=True)
     print("✅ 4-qismdan VIP", flush=True)
     print("✅ Loading xabarlari avtomatik o‘chadi", flush=True)
+    print("✅ Poster catalog + real views + Top 10", flush=True)
+    print("✅ Automatic backup enabled", flush=True)
+    asyncio.create_task(auto_backup_loop())
     print("🚀 Polling boshlanishiga tayyor", flush=True)
     print("========================================", flush=True)
 
@@ -1746,41 +1810,17 @@ async def anime_description(
     message: Message,
     state: FSMContext
 ):
-
-    if not is_admin(
-        message.from_user.id
-    ):
+    if not is_admin(message.from_user.id):
         await state.clear()
         return
 
-    description = (
-        message.text or ""
-    ).strip()
-
+    description = (message.text or "").strip()
     if not description:
-        await ask_text(
-            message,
-            "❌ Tavsifni kiriting."
-        )
+        await ask_text(message, "❌ Tavsifni kiriting.")
         return
 
-    data = await state.get_data()
-
-    if "title" not in data:
-        await state.clear()
-        await message.answer(
-            "❌ Anime ma'lumotlari topilmadi.",
-            reply_markup=admin_keyboard()
-        )
-        return
-
-    await state.update_data(
-        description=description
-    )
-
-    await state.set_state(
-        AddAnime.genre
-    )
+    await state.update_data(description=description)
+    await state.set_state(AddAnime.genre)
 
     await ask_text(
         message,
@@ -1795,26 +1835,52 @@ async def anime_genre(
     message: Message,
     state: FSMContext
 ):
-
-    if not is_admin(
-        message.from_user.id
-    ):
+    if not is_admin(message.from_user.id):
         await state.clear()
         return
 
-    genre = (
-        message.text or ""
-    ).strip()
-
+    genre = (message.text or "").strip()
     if genre == "-":
         genre = ""
 
     data = await state.get_data()
+    if "title" not in data or "description" not in data:
+        await state.clear()
+        await message.answer(
+            "❌ Anime ma'lumotlari topilmadi.",
+            reply_markup=admin_keyboard()
+        )
+        return
 
-    if (
-        "title" not in data
-        or "description" not in data
-    ):
+    await state.update_data(genre=genre)
+    await state.set_state(AddAnime.poster)
+
+    await ask_text(
+        message,
+        "4️⃣ Anime posterini yuboring.\n\n"
+        "🖼 Rasm yuboring yoki kerak bo‘lmasa <code>-</code> yozing."
+    )
+
+
+@dp.message(AddAnime.poster)
+async def anime_poster(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    if message.photo:
+        poster_file_id = message.photo[-1].file_id
+    elif (message.text or "").strip() == "-":
+        poster_file_id = ""
+    else:
+        await ask_text(message, "❌ Rasm yuboring yoki <code>-</code> yozing.")
+        return
+
+    data = await state.get_data()
+    if "title" not in data or "description" not in data or "genre" not in data:
         await state.clear()
         await message.answer(
             "❌ Anime ma'lumotlari topilmadi.",
@@ -1823,25 +1889,24 @@ async def anime_genre(
         return
 
     conn = connect_db()
-
     cursor = conn.execute(
         """
         INSERT INTO animes (
             title,
             description,
-            genre
+            genre,
+            poster_file_id
         )
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
         """,
         (
             data["title"],
             data["description"],
-            genre
+            data["genre"],
+            poster_file_id
         )
     )
-
     anime_id = cursor.lastrowid
-
     conn.commit()
     conn.close()
 
@@ -1851,10 +1916,11 @@ async def anime_genre(
         "✅ <b>ANIME SAQLANDI</b>\n\n"
         f"🆔 ID: <code>{anime_id}</code>\n"
         f"🎬 {data['title']}\n"
-        f"📝 {data['description']}\n"
-        f"🎭 {genre or 'Noma‘lum'}",
+        f"🎭 {data['genre'] or 'Noma‘lum'}\n"
+        f"🖼 Poster: {'✅' if poster_file_id else '➖'}",
         reply_markup=anime_keyboard()
     )
+
 
 # =========================================================
 # ANIME LIST
@@ -1996,64 +2062,42 @@ async def anime_edit_select(
     callback: CallbackQuery,
     state: FSMContext
 ):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-
-        await callback.answer(
-            "❌ Ruxsat yo‘q!",
-            show_alert=True
-        )
-
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Ruxsat yo‘q!", show_alert=True)
         return
 
-    anime_id = int(
-        callback.data.rsplit("_", 1)[1]
-    )
+    anime_id = int(callback.data.rsplit("_", 1)[1])
 
     conn = connect_db()
-
     row = conn.execute(
         """
-        SELECT title
+        SELECT title, description, genre, poster_file_id
         FROM animes
         WHERE id=?
         """,
         (anime_id,)
     ).fetchone()
-
     conn.close()
 
     if not row:
-
-        await callback.answer(
-            "❌ Anime topilmadi.",
-            show_alert=True
-        )
-
+        await callback.answer("❌ Anime topilmadi.", show_alert=True)
         return
 
     await state.clear()
-
     await state.update_data(
-        anime_id=anime_id
+        anime_id=anime_id,
+        old_poster_file_id=row["poster_file_id"] or ""
     )
-
-    await state.set_state(
-        EditAnime.title
-    )
+    await state.set_state(EditAnime.title)
 
     await callback.message.edit_text(
         f"✏️ Hozirgi nom: <b>{row['title']}</b>\n\n"
         "Yangi nomni yuboring:"
     )
-
     await callback.message.answer(
         "❌ Bekor qilish",
         reply_markup=cancel_keyboard()
     )
-
     await callback.answer()
 
 
@@ -2062,40 +2106,18 @@ async def edit_anime_title(
     message: Message,
     state: FSMContext
 ):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-
+    if not is_admin(message.from_user.id):
         await state.clear()
-
         return
 
-    title = (
-        message.text or ""
-    ).strip()
-
+    title = (message.text or "").strip()
     if not title:
-
-        await ask_text(
-            message,
-            "❌ Nom kiriting."
-        )
-
+        await ask_text(message, "❌ Nom kiriting.")
         return
 
-    await state.update_data(
-        title=title
-    )
-
-    await state.set_state(
-        EditAnime.description
-    )
-
-    await ask_text(
-        message,
-        "Yangi tavsifni yuboring."
-    )
+    await state.update_data(title=title)
+    await state.set_state(EditAnime.description)
+    await ask_text(message, "Yangi tavsifni yuboring.")
 
 
 @dp.message(EditAnime.description)
@@ -2103,60 +2125,100 @@ async def edit_anime_description(
     message: Message,
     state: FSMContext
 ):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-
+    if not is_admin(message.from_user.id):
         await state.clear()
-
         return
 
-    description = (
-        message.text or ""
-    ).strip()
-
+    description = (message.text or "").strip()
     if not description:
+        await ask_text(message, "❌ Tavsif kiriting.")
+        return
 
-        await ask_text(
-            message,
-            "❌ Tavsif kiriting."
-        )
+    await state.update_data(description=description)
+    await state.set_state(EditAnime.genre)
 
+    await ask_text(
+        message,
+        "Yangi janrni yuboring.\n"
+        "Janrni o‘chirish uchun <code>-</code>."
+    )
+
+
+@dp.message(EditAnime.genre)
+async def edit_anime_genre(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    genre = (message.text or "").strip()
+    if genre == "-":
+        genre = ""
+
+    await state.update_data(genre=genre)
+    await state.set_state(EditAnime.poster)
+
+    await ask_text(
+        message,
+        "Yangi poster rasm yuboring.\n"
+        "Eski posterni saqlash uchun <code>-</code>, olib tashlash uchun <code>0</code>."
+    )
+
+
+@dp.message(EditAnime.poster)
+async def edit_anime_poster(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        await state.clear()
         return
 
     data = await state.get_data()
 
-    if (
-        "anime_id" not in data
-        or "title" not in data
-    ):
-
+    if "anime_id" not in data or "title" not in data or "description" not in data or "genre" not in data:
         await state.clear()
-
         await message.answer(
             "❌ Tahrirlash jarayoni buzilgan.",
             reply_markup=admin_keyboard()
         )
+        return
 
+    old_poster = data.get("old_poster_file_id", "")
+
+    if message.photo:
+        poster_file_id = message.photo[-1].file_id
+    elif (message.text or "").strip() == "-":
+        poster_file_id = old_poster
+    elif (message.text or "").strip() == "0":
+        poster_file_id = ""
+    else:
+        await ask_text(
+            message,
+            "❌ Rasm yuboring, <code>-</code> yoki <code>0</code> yozing."
+        )
         return
 
     conn = connect_db()
-
     conn.execute(
         """
         UPDATE animes
         SET title=?,
-            description=?
+            description=?,
+            genre=?,
+            poster_file_id=?
         WHERE id=?
         """,
         (
             data["title"],
-            description,
+            data["description"],
+            data["genre"],
+            poster_file_id,
             data["anime_id"]
         )
     )
-
     conn.commit()
     conn.close()
 
@@ -2166,7 +2228,8 @@ async def edit_anime_description(
         "✅ <b>ANIME YANGILANDI</b>\n\n"
         f"🆔 ID: <code>{data['anime_id']}</code>\n"
         f"🎬 {data['title']}\n"
-        f"📝 {description}",
+        f"🎭 {data['genre'] or 'Noma‘lum'}\n"
+        f"🖼 Poster: {'✅' if poster_file_id else '➖'}",
         reply_markup=anime_keyboard()
     )
 
@@ -4637,7 +4700,7 @@ async def send_anime_card(
 
     anime = conn.execute(
         """
-        SELECT id, title, description, genre
+        SELECT id, title, description, genre, poster_file_id, view_count
         FROM animes
         WHERE id=?
         AND is_active=1
@@ -4651,7 +4714,7 @@ async def send_anime_card(
 
     episodes = conn.execute(
         """
-        SELECT id, episode_number, title, is_vip
+        SELECT id, episode_number, title, is_vip, view_count
         FROM episodes
         WHERE anime_id=?
         ORDER BY episode_number ASC, id ASC
@@ -4698,15 +4761,29 @@ async def send_anime_card(
         )
     ])
 
-    await message.answer(
-        f"🎬 <b>{anime['title']}</b>\n\n"
-        f"📝 {anime['description'] or '-'}\n"
-        f"🎭 Janr: <b>{anime['genre'] or 'Noma‘lum'}</b>\n\n"
-        "📺 <b>Qismlar:</b>\n"
-        "✅ 1–3-qism bepul\n"
-        "🔒 4-qismdan boshlab VIP",
-        reply_markup=inline(buttons)
+    description = anime["description"] or "-"
+    if len(description) > 700:
+        description = description[:697] + "..."
+
+    caption = (
+        f"🎬 <b>{anime['title']}</b>\n"
+        f"🎭 Janr: <b>{anime['genre'] or 'Noma‘lum'}</b>\n"
+        f"👁 Ko‘rishlar: <b>{anime['view_count'] or 0}</b>\n"
+        f"📺 Qismlar: <b>{len(episodes)}</b>\n\n"
+        f"📝 {description}"
     )
+
+    if anime["poster_file_id"]:
+        await message.answer_photo(
+            anime["poster_file_id"],
+            caption=caption,
+            reply_markup=inline(buttons)
+        )
+    else:
+        await message.answer(
+            caption,
+            reply_markup=inline(buttons)
+        )
 
     return True
 
@@ -4787,13 +4864,10 @@ async def popular_anime_button(
         SELECT
             a.id,
             a.title,
-            COUNT(h.id) AS views
+            COALESCE(a.view_count, 0) AS views
         FROM animes a
-        LEFT JOIN watch_history h
-            ON h.anime_id=a.id
         WHERE a.is_active=1
-        GROUP BY a.id, a.title
-        ORDER BY views DESC, a.id DESC
+        ORDER BY a.view_count DESC, a.id DESC
         LIMIT 15
         """
     ).fetchall()
@@ -4820,6 +4894,59 @@ async def popular_anime_button(
     await message.answer(
         "🔥 <b>MASHHUR ANIMELAR</b>\n\n"
         "Ko‘rishlar asosida:",
+        reply_markup=inline(buttons)
+    )
+
+
+@dp.message(F.text == "🏆 Top 10")
+async def top10_user_button(
+    message: Message,
+    state: FSMContext
+):
+    if user_is_banned(message.from_user.id):
+        return
+
+    await state.clear()
+    register_user(message.from_user)
+
+    conn = connect_db()
+    rows = conn.execute(
+        """
+        SELECT id, title, view_count
+        FROM animes
+        WHERE is_active=1
+        ORDER BY view_count DESC, id DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await message.answer(
+            "🏆 <b>TOP 10</b>\n\nHozircha anime yo‘q.",
+            reply_markup=user_keyboard()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"🏆 {index}. {row['title'][:35]} · 👁 {row['view_count'] or 0}",
+                callback_data=f"open_anime_{row['id']}"
+            )
+        ]
+        for index, row in enumerate(rows, start=1)
+    ]
+    buttons.append([
+        InlineKeyboardButton(
+            text="🏠 Bosh menyu",
+            callback_data="user_home"
+        )
+    ])
+
+    await message.answer(
+        "🏆 <b>TOP 10 ANIMELAR</b>\n\n"
+        "Haqiqiy video yuborishlar asosida:",
         reply_markup=inline(buttons)
     )
 
@@ -5309,6 +5436,211 @@ async def user_genres_callback(
         "📚 <b>JANRLAR</b>\n\nJanrni tanlang:",
         reply_markup=inline(buttons)
     )
+
+
+async def admin_dashboard_text():
+    conn = connect_db()
+    values = {
+        "users": conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"],
+        "anime": conn.execute("SELECT COUNT(*) c FROM animes WHERE is_active=1").fetchone()["c"],
+        "episodes": conn.execute("SELECT COUNT(*) c FROM episodes").fetchone()["c"],
+        "shorts": conn.execute("SELECT COUNT(*) c FROM shorts").fetchone()["c"],
+        "vip": conn.execute("SELECT COUNT(*) c FROM users WHERE is_vip=1").fetchone()["c"],
+        "favorites": conn.execute("SELECT COUNT(*) c FROM favorites").fetchone()["c"],
+        "requests": conn.execute("SELECT COUNT(*) c FROM anime_requests WHERE status='pending'").fetchone()["c"],
+        "views": conn.execute("SELECT COALESCE(SUM(view_count),0) c FROM episodes").fetchone()["c"],
+        "short_views": conn.execute("SELECT COALESCE(SUM(view_count),0) c FROM shorts").fetchone()["c"],
+    }
+    conn.close()
+
+    return (
+        "📈 <b>BOT DASHBOARD</b>\n\n"
+        f"👥 Users: <b>{values['users']}</b>\n"
+        f"🎬 Active anime: <b>{values['anime']}</b>\n"
+        f"📺 Qismlar: <b>{values['episodes']}</b>\n"
+        f"🎞 Shorts: <b>{values['shorts']}</b>\n"
+        f"⭐ VIP users: <b>{values['vip']}</b>\n"
+        f"❤️ Favorites: <b>{values['favorites']}</b>\n"
+        f"📩 Pending requests: <b>{values['requests']}</b>\n"
+        f"👁 Video views: <b>{values['views']}</b>\n"
+        f"🎞 Shorts views: <b>{values['short_views']}</b>"
+    )
+
+
+@dp.message(F.text == "🏆 Top 10")
+async def top10_admin_reply(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+
+    conn = connect_db()
+    rows = conn.execute(
+        """
+        SELECT title, view_count
+        FROM animes
+        WHERE is_active=1
+        ORDER BY view_count DESC, id DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    conn.close()
+
+    lines = ["🏆 <b>TOP 10 ANIMELAR</b>", ""]
+    if not rows:
+        lines.append("Hozircha anime yo‘q.")
+    else:
+        for index, row in enumerate(rows, start=1):
+            lines.append(
+                f"{index}. <b>{row['title']}</b> — 👁 {row['view_count'] or 0}"
+            )
+
+    await message.answer("\n".join(lines), reply_markup=admin_keyboard())
+
+
+async def make_and_deliver_backup(admin_id: int):
+    path = await asyncio.to_thread(make_backup)
+    try:
+        await bot.send_document(
+            chat_id=admin_id,
+            document=FSInputFile(str(path)),
+            caption=(
+                "💾 <b>BACKUP TAYYOR</b>\n\n"
+                f"📅 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+            )
+        )
+    except Exception as exc:
+        print(
+            f"⚠️ Backup delivery failed for {admin_id}: {type(exc).__name__}: {exc}",
+            flush=True
+        )
+
+
+async def auto_backup_loop():
+    while True:
+        try:
+            for admin_id in ADMIN_IDS:
+                await make_and_deliver_backup(admin_id)
+            print("✅ Automatic backup completed.", flush=True)
+        except Exception as exc:
+            print(
+                f"⚠️ Automatic backup error: {type(exc).__name__}: {exc}",
+                flush=True
+            )
+        await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
+
+
+@dp.message(F.text == "💾 Backup")
+async def backup_reply(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer("⏳ <b>Backup tayyorlanmoqda...</b>")
+    await make_and_deliver_backup(message.from_user.id)
+    await message.answer("✅ <b>Backup yuborildi.</b>", reply_markup=admin_keyboard())
+
+
+@dp.message(F.text == "📈 Dashboard")
+async def dashboard_reply(
+    message: Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(
+        await admin_dashboard_text(),
+        reply_markup=inline([
+            [
+                InlineKeyboardButton(text="🏆 Top 10", callback_data="admin_top10"),
+                InlineKeyboardButton(text="💾 Backup", callback_data="admin_backup")
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")
+            ]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "admin_dashboard")
+async def dashboard_callback(
+    callback: CallbackQuery
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Ruxsat yo‘q!", show_alert=True)
+        return
+    await callback.message.edit_text(
+        await admin_dashboard_text(),
+        reply_markup=inline([
+            [
+                InlineKeyboardButton(text="🏆 Top 10", callback_data="admin_top10"),
+                InlineKeyboardButton(text="💾 Backup", callback_data="admin_backup")
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")
+            ]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_top10")
+async def top10_admin_callback(
+    callback: CallbackQuery
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Ruxsat yo‘q!", show_alert=True)
+        return
+    conn = connect_db()
+    rows = conn.execute(
+        """
+        SELECT title, view_count
+        FROM animes
+        WHERE is_active=1
+        ORDER BY view_count DESC, id DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    conn.close()
+
+    lines = ["🏆 <b>TOP 10 ANIMELAR</b>", ""]
+    if not rows:
+        lines.append("Hozircha anime yo‘q.")
+    else:
+        for index, row in enumerate(rows, start=1):
+            lines.append(
+                f"{index}. <b>{row['title']}</b> — 👁 {row['view_count'] or 0}"
+            )
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=inline([
+            [
+                InlineKeyboardButton(text="📈 Dashboard", callback_data="admin_dashboard"),
+                InlineKeyboardButton(text="💾 Backup", callback_data="admin_backup")
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")
+            ]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_backup")
+async def backup_callback(
+    callback: CallbackQuery
+):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Ruxsat yo‘q!", show_alert=True)
+        return
+    await callback.answer("⏳ Backup tayyorlanmoqda...")
+    await make_and_deliver_backup(callback.from_user.id)
 
 
 # =========================================================
