@@ -606,7 +606,7 @@ async def send_short_video(
             protect_content=True
         )
 
-record_short_view(current["id"])
+        record_short_view(current["id"])
 
     finally:
 
