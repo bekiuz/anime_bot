@@ -1849,7 +1849,7 @@ async def anime_genre(
         f"🆔 ID: <code>{anime_id}</code>\n"
         f"🎬 {data['title']}\n"
         f"📝 {data['description']}\n"
-        f"🎭 {genre or 'Noma\'lum'}",
+        f"🎭 {genre or 'Noma‘lum'}",
         reply_markup=anime_keyboard()
     )
 
