@@ -270,6 +270,174 @@ def user_is_vip(user_id: int) -> bool:
 
 
 # =========================================================
+# USER FEATURES / SAFETY
+# =========================================================
+
+def user_is_banned(user_id: int) -> bool:
+
+    if is_admin(user_id):
+        return False
+
+    conn = connect_db()
+
+    row = conn.execute(
+        """
+        SELECT is_banned
+        FROM users
+        WHERE telegram_id=?
+        """,
+        (user_id,)
+    ).fetchone()
+
+    conn.close()
+
+    return bool(row and row["is_banned"])
+
+
+def record_watch(
+    telegram_id: int,
+    anime_id: int,
+    episode_id: int
+):
+
+    conn = connect_db()
+
+    conn.execute(
+        """
+        INSERT INTO watch_history (
+            telegram_id,
+            anime_id,
+            episode_id,
+            watched_at
+        )
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(telegram_id, episode_id)
+        DO UPDATE SET
+            watched_at=excluded.watched_at
+        """,
+        (
+            telegram_id,
+            anime_id,
+            episode_id,
+            datetime.now(timezone.utc).isoformat()
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def is_favorite(
+    telegram_id: int,
+    anime_id: int
+) -> bool:
+
+    conn = connect_db()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM favorites
+        WHERE telegram_id=?
+        AND anime_id=?
+        """,
+        (telegram_id, anime_id)
+    ).fetchone()
+
+    conn.close()
+
+    return bool(row)
+
+
+def toggle_favorite(
+    telegram_id: int,
+    anime_id: int
+) -> bool:
+
+    conn = connect_db()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM favorites
+        WHERE telegram_id=?
+        AND anime_id=?
+        """,
+        (telegram_id, anime_id)
+    ).fetchone()
+
+    if row:
+        conn.execute(
+            """
+            DELETE FROM favorites
+            WHERE telegram_id=?
+            AND anime_id=?
+            """,
+            (telegram_id, anime_id)
+        )
+        result = False
+    else:
+        conn.execute(
+            """
+            INSERT INTO favorites (
+                telegram_id,
+                anime_id
+            )
+            VALUES (?, ?)
+            """,
+            (telegram_id, anime_id)
+        )
+        result = True
+
+    conn.commit()
+    conn.close()
+
+    return result
+
+
+async def notify_favorited_users(
+    anime_id: int,
+    anime_title: str,
+    episode_number: int
+):
+
+    conn = connect_db()
+
+    rows = conn.execute(
+        """
+        SELECT telegram_id
+        FROM favorites
+        WHERE anime_id=?
+        """,
+        (anime_id,)
+    ).fetchall()
+
+    conn.close()
+
+    for row in rows:
+
+        user_id = row["telegram_id"]
+
+        if user_is_banned(user_id):
+            continue
+
+        try:
+            await bot.send_message(
+                user_id,
+                "🔔 <b>Yangi qism chiqdi!</b>\n\n"
+                f"🎬 <b>{anime_title}</b>\n"
+                f"📺 {episode_number}-qism\n\n"
+                "Botga kirib tomosha qilishingiz mumkin."
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Notification failed for {user_id}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True
+            )
+
+
+# =========================================================
 # MESSAGE ANIMATION HELPER
 # =========================================================
 
@@ -474,6 +642,7 @@ async def short_next_video(
 class AddAnime(StatesGroup):
     title = State()
     description = State()
+    genre = State()
 
 
 class EditAnime(StatesGroup):
@@ -520,6 +689,10 @@ class VipRemove(StatesGroup):
 
 class Broadcast(StatesGroup):
     message = State()
+
+
+class AnimeRequest(StatesGroup):
+    title = State()
 
 
 # =========================================================
@@ -604,10 +777,22 @@ def user_keyboard():
         keyboard=[
             [
                 KeyboardButton(text="🔎 ID qidirish"),
+                KeyboardButton(text="🆕 Yangi")
+            ],
+            [
+                KeyboardButton(text="🔥 Mashhur"),
                 KeyboardButton(text="🎞 Shorts")
             ],
             [
-                KeyboardButton(text="⭐ VIP"),
+                KeyboardButton(text="❤️ Sevimlilar"),
+                KeyboardButton(text="🕘 Tarix")
+            ],
+            [
+                KeyboardButton(text="📚 Janrlar"),
+                KeyboardButton(text="⭐ VIP")
+            ],
+            [
+                KeyboardButton(text="📩 Anime so‘rash"),
                 KeyboardButton(text="📢 Reklama")
             ],
             [
@@ -876,6 +1061,14 @@ async def start_handler(
     register_user(
         message.from_user
     )
+
+    if user_is_banned(message.from_user.id):
+        await state.clear()
+        await message.answer(
+            "🚫 <b>SIZ BLOKLANGANSIZ</b>\n\n"
+            "Botdan foydalanish huquqingiz vaqtincha cheklangan."
+        )
+        return
 
     await state.clear()
 
@@ -1542,9 +1735,7 @@ async def anime_description(
     if not is_admin(
         message.from_user.id
     ):
-
         await state.clear()
-
         return
 
     description = (
@@ -1552,25 +1743,68 @@ async def anime_description(
     ).strip()
 
     if not description:
-
         await ask_text(
             message,
             "❌ Tavsifni kiriting."
         )
-
         return
 
     data = await state.get_data()
 
     if "title" not in data:
-
         await state.clear()
-
         await message.answer(
             "❌ Anime ma'lumotlari topilmadi.",
             reply_markup=admin_keyboard()
         )
+        return
 
+    await state.update_data(
+        description=description
+    )
+
+    await state.set_state(
+        AddAnime.genre
+    )
+
+    await ask_text(
+        message,
+        "3️⃣ Janrlarni kiriting.\n\n"
+        "Masalan: <code>Action, Fantasy, Comedy</code>\n"
+        "Kerak bo‘lmasa: <code>-</code>"
+    )
+
+
+@dp.message(AddAnime.genre)
+async def anime_genre(
+    message: Message,
+    state: FSMContext
+):
+
+    if not is_admin(
+        message.from_user.id
+    ):
+        await state.clear()
+        return
+
+    genre = (
+        message.text or ""
+    ).strip()
+
+    if genre == "-":
+        genre = ""
+
+    data = await state.get_data()
+
+    if (
+        "title" not in data
+        or "description" not in data
+    ):
+        await state.clear()
+        await message.answer(
+            "❌ Anime ma'lumotlari topilmadi.",
+            reply_markup=admin_keyboard()
+        )
         return
 
     conn = connect_db()
@@ -1579,13 +1813,15 @@ async def anime_description(
         """
         INSERT INTO animes (
             title,
-            description
+            description,
+            genre
         )
-        VALUES (?, ?)
+        VALUES (?, ?, ?)
         """,
         (
             data["title"],
-            description
+            data["description"],
+            genre
         )
     )
 
@@ -1600,10 +1836,10 @@ async def anime_description(
         "✅ <b>ANIME SAQLANDI</b>\n\n"
         f"🆔 ID: <code>{anime_id}</code>\n"
         f"🎬 {data['title']}\n"
-        f"📝 {description}",
+        f"📝 {data['description']}\n"
+        f"🎭 {genre or 'Noma\'lum'}",
         reply_markup=anime_keyboard()
     )
-
 
 # =========================================================
 # ANIME LIST
@@ -4376,6 +4612,9 @@ async def numeric_search(
     message: Message,
     state: FSMContext
 ):
+
+    if user_is_banned(message.from_user.id):
+        return
 
     current_state = await state.get_state()
 
