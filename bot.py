@@ -5823,7 +5823,7 @@ async def numeric_search(
                 protect_content=True
             )
 
-record_watch(
+            record_watch(
                 message.from_user.id,
                 episode["anime_id"],
                 episode["id"]
@@ -6043,7 +6043,7 @@ async def user_episode(
             protect_content=True
         )
 
-record_watch(
+        record_watch(
             callback.from_user.id,
             episode["anime_id"],
             episode["id"]
