@@ -4899,7 +4899,7 @@ async def popular_anime_button(
 
 
 @dp.message(F.text == "🏆 Top 10")
-async def top10_user_button(
+async def top10_button(
     message: Message,
     state: FSMContext
 ):
@@ -4921,33 +4921,26 @@ async def top10_user_button(
     ).fetchall()
     conn.close()
 
+    is_user_admin = is_admin(message.from_user.id)
+    title = "🏆 <b>ADMIN TOP 10</b>" if is_user_admin else "🏆 <b>TOP 10 ANIMELAR</b>"
+    reply_markup = admin_keyboard() if is_user_admin else user_keyboard()
+
     if not rows:
         await message.answer(
-            "🏆 <b>TOP 10</b>\n\nHozircha anime yo‘q.",
-            reply_markup=user_keyboard()
+            title + "\n\nHozircha anime yo‘q.",
+            reply_markup=reply_markup
         )
         return
 
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text=f"🏆 {index}. {row['title'][:35]} · 👁 {row['view_count'] or 0}",
-                callback_data=f"open_anime_{row['id']}"
-            )
-        ]
-        for index, row in enumerate(rows, start=1)
-    ]
-    buttons.append([
-        InlineKeyboardButton(
-            text="🏠 Bosh menyu",
-            callback_data="user_home"
+    lines = []
+    for index, row in enumerate(rows, start=1):
+        lines.append(
+            f"{index}. <b>{row['title']}</b> — 👁 {row['view_count'] or 0}"
         )
-    ])
 
     await message.answer(
-        "🏆 <b>TOP 10 ANIMELAR</b>\n\n"
-        "Haqiqiy video yuborishlar asosida:",
-        reply_markup=inline(buttons)
+        title + "\n\n" + "\n".join(lines),
+        reply_markup=reply_markup
     )
 
 
@@ -5263,14 +5256,21 @@ async def favorite_toggle_callback(
         )
         return
 
-    anime_id = int(
-        callback.data.rsplit("_", 1)[1]
-    )
+    anime_id = int(callback.data.rsplit("_", 1)[1])
 
-    if not await send_anime_card(
-        callback.message,
-        anime_id
-    ):
+    conn = connect_db()
+    exists = conn.execute(
+        """
+        SELECT id
+        FROM animes
+        WHERE id=?
+        AND is_active=1
+        """,
+        (anime_id,)
+    ).fetchone()
+    conn.close()
+
+    if not exists:
         await callback.answer(
             "❌ Anime topilmadi.",
             show_alert=True
@@ -5282,8 +5282,10 @@ async def favorite_toggle_callback(
         anime_id
     )
 
-    # Refresh the card with the new favorite state.
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
     await send_anime_card(
         callback.message,
@@ -5465,39 +5467,6 @@ async def admin_dashboard_text():
         f"👁 Video views: <b>{values['views']}</b>\n"
         f"🎞 Shorts views: <b>{values['short_views']}</b>"
     )
-
-
-@dp.message(F.text == "🏆 Top 10")
-async def top10_admin_reply(
-    message: Message,
-    state: FSMContext
-):
-    if not is_admin(message.from_user.id):
-        return
-    await state.clear()
-
-    conn = connect_db()
-    rows = conn.execute(
-        """
-        SELECT title, view_count
-        FROM animes
-        WHERE is_active=1
-        ORDER BY view_count DESC, id DESC
-        LIMIT 10
-        """
-    ).fetchall()
-    conn.close()
-
-    lines = ["🏆 <b>TOP 10 ANIMELAR</b>", ""]
-    if not rows:
-        lines.append("Hozircha anime yo‘q.")
-    else:
-        for index, row in enumerate(rows, start=1):
-            lines.append(
-                f"{index}. <b>{row['title']}</b> — 👁 {row['view_count'] or 0}"
-            )
-
-    await message.answer("\n".join(lines), reply_markup=admin_keyboard())
 
 
 async def make_and_deliver_backup(admin_id: int):
