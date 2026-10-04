@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = (os.getenv("BOT_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
 
 ADMIN_IDS = {
     int(x.strip())
@@ -830,28 +830,36 @@ def admin_inline():
 @dp.startup()
 async def startup():
 
-    init_db()
+    print("🚀 Bot startup boshlandi...", flush=True)
 
-    update_episode_vip_status()
+    try:
+        init_db()
+        update_episode_vip_status()
+    except Exception as e:
+        print(
+            f"❌ DATABASE STARTUP ERROR: {type(e).__name__}: {e}",
+            flush=True
+        )
+        raise
 
-    print("========================================")
-    print("🤖 ANIME BOT")
-    print("========================================")
-    print(f"✅ {len(ADMIN_IDS)} ta admin")
-    print("✅ SQLite database")
-    print("✅ Anime")
-    print("✅ Qismlar")
-    print("✅ Shorts")
-    print("✅ VIP")
-    print("✅ Rassilka")
-    print("✅ Reklama")
-    print("✅ Client keyboard")
-    print("✅ Bekor qilish")
-    print("✅ 1-3 qism bepul")
-    print("✅ 4-qismdan VIP")
-    print("✅ Loading xabarlari avtomatik o‘chadi")
-    print("🚀 Polling boshlandi")
-    print("========================================")
+    print("========================================", flush=True)
+    print("🤖 ANIME BOT", flush=True)
+    print("========================================", flush=True)
+    print(f"✅ {len(ADMIN_IDS)} ta admin", flush=True)
+    print("✅ Supabase PostgreSQL database", flush=True)
+    print("✅ Anime", flush=True)
+    print("✅ Qismlar", flush=True)
+    print("✅ Shorts", flush=True)
+    print("✅ VIP", flush=True)
+    print("✅ Rassilka", flush=True)
+    print("✅ Reklama", flush=True)
+    print("✅ Client keyboard", flush=True)
+    print("✅ Bekor qilish", flush=True)
+    print("✅ 1-3 qism bepul", flush=True)
+    print("✅ 4-qismdan VIP", flush=True)
+    print("✅ Loading xabarlari avtomatik o‘chadi", flush=True)
+    print("🚀 Polling boshlanishiga tayyor", flush=True)
+    print("========================================", flush=True)
 
 
 # =========================================================
@@ -4712,6 +4720,8 @@ async def fallback(
 # =========================================================
 
 async def main():
+
+    print("🚀 Telegram polling ishga tushmoqda...", flush=True)
 
     await dp.start_polling(
         bot
