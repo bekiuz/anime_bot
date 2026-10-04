@@ -1078,10 +1078,13 @@ async def start_handler(
         len(command_parts) == 2
         and command_parts[1].startswith("anime_")
     ):
-        value = command_parts[1].replace("anime_", "", 1)
+        anime_id_text = command_parts[1].replace("anime_", "", 1)
 
-        if value.isdigit():
-            if await send_anime_card(message, int(value)):
+        if anime_id_text.isdigit():
+            if await send_anime_card(
+                message,
+                int(anime_id_text)
+            ):
                 return
 
     if is_admin(
@@ -5137,18 +5140,6 @@ async def favorite_toggle_callback(
         callback.data.rsplit("_", 1)[1]
     )
 
-    register_user(callback.from_user)
-
-    favorite = toggle_favorite(
-        callback.from_user.id,
-        anime_id
-    )
-
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
     if not await send_anime_card(
         callback.message,
         anime_id
@@ -5159,11 +5150,23 @@ async def favorite_toggle_callback(
         )
         return
 
-    await callback.answer(
-        "❤️ Sevimlilarga qo‘shildi."
-        if favorite
-        else "💔 Sevimlilardan olib tashlandi."
+    favorite = toggle_favorite(
+        callback.from_user.id,
+        anime_id
     )
+
+    # Refresh the card with the new favorite state.
+    await callback.message.delete()
+
+    await send_anime_card(
+        callback.message,
+        anime_id
+    )
+
+    await callback.answer(
+        "❤️ Saqlandi." if favorite else "💔 O‘chirildi."
+    )
+
 
 @dp.callback_query(F.data.regexp(r"^genre_\d+$"))
 async def genre_callback(
@@ -5420,3 +5423,390 @@ async def admin_unban_command(
 @dp.message(
     F.text.regexp(r"^\d+$")
 )
+async def numeric_search(
+    message: Message,
+    state: FSMContext
+):
+
+    if user_is_banned(message.from_user.id):
+        return
+
+    current_state = await state.get_state()
+
+    if current_state:
+        return
+
+    register_user(
+        message.from_user
+    )
+
+    value = int(
+        message.text.strip()
+    )
+
+    conn = connect_db()
+
+    episode = conn.execute(
+        """
+        SELECT
+            e.id,
+            e.episode_number,
+            e.title,
+            e.video_file_id,
+            e.is_vip,
+            e.anime_id,
+            a.title AS anime
+        FROM episodes e
+        JOIN animes a
+        ON a.id=e.anime_id
+        WHERE e.id=?
+        """,
+        (value,)
+    ).fetchone()
+
+    if episode:
+
+        conn.close()
+
+        if (
+            episode["is_vip"]
+            and not user_is_vip(
+                message.from_user.id
+            )
+        ):
+
+            await message.answer(
+                "🔒 <b>VIP KONTENT</b>\n\n"
+                "Bu qism 4-qismdan boshlab VIP kontentga kiradi.\n\n"
+                "⭐ VIP oling va barcha qismlarni oching.",
+                reply_markup=inline([
+                    [
+                        InlineKeyboardButton(
+                            text="⭐ VIP olish",
+                            url="https://t.me/Ichi1010"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🏠 Bosh menyu",
+                            callback_data="user_home"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        loading_message, opening_message = (
+            await send_loading_messages(
+                message.from_user.id,
+                "⏳ <b>Qism tayyorlanmoqda...</b>",
+                "🎬 <b>Qism ochilmoqda...</b>"
+            )
+        )
+
+        try:
+
+            record_watch(
+                message.from_user.id,
+                episode["anime_id"],
+                episode["id"]
+            )
+
+            await message.answer_video(
+                episode["video_file_id"],
+                caption=(
+                    f"🎬 <b>{episode['anime']}</b>\n"
+                    f"📺 {episode['episode_number']}-qism\n"
+                    f"📝 {episode['title']}\n"
+                    f"🆔 ID: <code>{episode['id']}</code>"
+                ),
+                protect_content=True
+            )
+
+        finally:
+
+            await delete_message_safe(
+                message.chat.id,
+                loading_message.message_id
+            )
+
+            await delete_message_safe(
+                message.chat.id,
+                opening_message.message_id
+            )
+
+        return
+
+    anime = conn.execute(
+        """
+        SELECT
+            id,
+            title,
+            description
+        FROM animes
+        WHERE id=?
+        AND is_active=1
+        """,
+        (value,)
+    ).fetchone()
+
+    if anime:
+
+        episodes = conn.execute(
+            """
+            SELECT
+                id,
+                episode_number,
+                title,
+                is_vip
+            FROM episodes
+            WHERE anime_id=?
+            ORDER BY episode_number ASC, id ASC
+            """,
+            (value,)
+        ).fetchall()
+
+        conn.close()
+
+        buttons = []
+
+        for ep in episodes:
+
+            if ep["is_vip"]:
+
+                label = (
+                    f"🔒 {ep['episode_number']}-qism "
+                    f"⭐ VIP"
+                )
+
+            else:
+
+                label = (
+                    f"▶️ {ep['episode_number']}-qism"
+                )
+
+            buttons.append([
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"user_episode_{ep['id']}"
+                )
+            ])
+
+        if buttons:
+
+            await message.answer(
+                f"🎬 <b>{anime['title']}</b>\n\n"
+                f"{anime['description']}\n\n"
+                "📺 <b>Qismlar:</b>\n"
+                "✅ 1–3-qism bepul\n"
+                "🔒 4-qismdan boshlab VIP",
+                reply_markup=inline(buttons)
+            )
+
+        else:
+
+            await message.answer(
+                f"🎬 <b>{anime['title']}</b>\n\n"
+                f"{anime['description']}\n\n"
+                "📺 Hozircha qism yo‘q.",
+                reply_markup=user_keyboard()
+            )
+
+        return
+
+    conn.close()
+
+    await message.answer(
+        "❌ <b>Bunday anime yoki qism ID topilmadi.</b>\n\n"
+        f"🔎 ID: <code>{value}</code>",
+        reply_markup=user_keyboard()
+    )
+
+
+# =========================================================
+# USER EPISODE
+# =========================================================
+
+@dp.callback_query(
+    F.data.startswith("user_episode_")
+)
+async def user_episode(
+    callback: CallbackQuery
+):
+
+    if user_is_banned(callback.from_user.id):
+        await callback.answer(
+            "❌ Siz bloklangansiz.",
+            show_alert=True
+        )
+        return
+
+    episode_id = int(
+        callback.data.rsplit("_", 1)[1]
+    )
+
+    conn = connect_db()
+
+    episode = conn.execute(
+        """
+        SELECT
+            e.id,
+            e.anime_id,
+            e.episode_number,
+            e.title,
+            e.video_file_id,
+            e.is_vip,
+            a.title AS anime
+        FROM episodes e
+        JOIN animes a
+        ON a.id=e.anime_id
+        WHERE e.id=?
+        """,
+        (episode_id,)
+    ).fetchone()
+
+    conn.close()
+
+    if not episode:
+
+        await callback.answer(
+            "❌ Qism topilmadi.",
+            show_alert=True
+        )
+
+        return
+
+    if (
+        episode["is_vip"]
+        and not user_is_vip(
+            callback.from_user.id
+        )
+    ):
+
+        await callback.answer(
+            "⭐ Bu qism VIP uchun.",
+            show_alert=True
+        )
+
+        await bot.send_message(
+            callback.from_user.id,
+            "🔒 <b>VIP KONTENT</b>\n\n"
+            f"🎬 {episode['anime']}\n"
+            f"📺 {episode['episode_number']}-qism\n\n"
+            "4-qismdan boshlab bu anime VIP kontent hisoblanadi.",
+            reply_markup=inline([
+                [
+                    InlineKeyboardButton(
+                        text="⭐ VIP olish",
+                        url="https://t.me/Ichi1010"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🏠 Bosh menyu",
+                        callback_data="user_home"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+    await callback.answer()
+
+    loading_message, opening_message = (
+        await send_loading_messages(
+            callback.from_user.id,
+            "⏳ <b>Qism tayyorlanmoqda...</b>",
+            "🎬 <b>Qism ochilmoqda...</b>"
+        )
+    )
+
+    try:
+
+        record_watch(
+            callback.from_user.id,
+            episode["anime_id"],
+            episode["id"]
+        )
+
+        await bot.send_video(
+            callback.from_user.id,
+            episode["video_file_id"],
+            caption=(
+                f"🎬 <b>{episode['anime']}</b>\n"
+                f"📺 {episode['episode_number']}-qism\n"
+                f"📝 {episode['title']}"
+            ),
+            protect_content=True
+        )
+
+    finally:
+
+        await delete_message_safe(
+            callback.from_user.id,
+            loading_message.message_id
+        )
+
+        await delete_message_safe(
+            callback.from_user.id,
+            opening_message.message_id
+        )
+
+
+# =========================================================
+# FALLBACK
+# =========================================================
+
+@dp.message()
+async def fallback(
+    message: Message,
+    state: FSMContext
+):
+
+    current_state = await state.get_state()
+
+    if current_state:
+        return
+
+    register_user(
+        message.from_user
+    )
+
+    if is_admin(
+        message.from_user.id
+    ):
+
+        await message.answer(
+            "👑 <b>ADMIN PANEL</b>\n\n"
+            "Pastki klaviaturadan foydalaning.",
+            reply_markup=admin_keyboard()
+        )
+
+    else:
+
+        await message.answer(
+            "🔎 Anime yoki qism ID raqamini yuboring.",
+            reply_markup=user_keyboard()
+        )
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+async def main():
+
+    print("🚀 Telegram polling ishga tushmoqda...", flush=True)
+
+    await dp.start_polling(
+        bot
+    )
+
+
+if __name__ == "__main__":
+
+    asyncio.run(
+        main()
+    )
