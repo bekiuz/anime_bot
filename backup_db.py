@@ -87,6 +87,7 @@ def make_backup():
         flush=True,
     )
 
+    return backup_path
 
 if __name__ == "__main__":
     make_backup()
