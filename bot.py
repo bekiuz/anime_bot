@@ -589,7 +589,7 @@ async def send_short_video(
         )
     )
 
-    record_short_view(current["id"])
+    
 
     try:
 
@@ -605,6 +605,8 @@ async def send_short_video(
             reply_markup=inline(buttons),
             protect_content=True
         )
+
+record_short_view(current["id"])
 
     finally:
 
@@ -5808,11 +5810,7 @@ async def numeric_search(
 
         try:
 
-            record_watch(
-                message.from_user.id,
-                episode["anime_id"],
-                episode["id"]
-            )
+            
 
             await message.answer_video(
                 episode["video_file_id"],
@@ -5823,6 +5821,12 @@ async def numeric_search(
                     f"🆔 ID: <code>{episode['id']}</code>"
                 ),
                 protect_content=True
+            )
+
+record_watch(
+                message.from_user.id,
+                episode["anime_id"],
+                episode["id"]
             )
 
         finally:
@@ -6026,11 +6030,7 @@ async def user_episode(
 
     try:
 
-        record_watch(
-            callback.from_user.id,
-            episode["anime_id"],
-            episode["id"]
-        )
+        
 
         await bot.send_video(
             callback.from_user.id,
@@ -6041,6 +6041,12 @@ async def user_episode(
                 f"📝 {episode['title']}"
             ),
             protect_content=True
+        )
+
+record_watch(
+            callback.from_user.id,
+            episode["anime_id"],
+            episode["id"]
         )
 
     finally:
